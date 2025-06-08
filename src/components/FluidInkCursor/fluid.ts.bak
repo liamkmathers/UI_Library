@@ -1,0 +1,394 @@
+export interface Config {
+  SIM_RESOLUTION: number;
+  DYE_RESOLUTION: number;
+  COLORS: [number, number, number, number][];
+  SPLAT_RADIUS: number;
+  FORCE_MULT: number;
+  TRANSPARENT: boolean;
+  BACK_COLOR: [number, number, number, number];
+}
+
+// Shader sources with proper precision and attribute setup
+const baseVertexShader = `
+  precision highp float;
+  attribute vec2 aPosition;
+  varying vec2 vUv;
+  varying vec2 vL;
+  varying vec2 vR;
+  varying vec2 vT;
+  varying vec2 vB;
+  uniform vec2 texelSize;
+  
+  void main () {
+    vUv = aPosition * 0.5 + 0.5;
+    vL = vUv - vec2(texelSize.x, 0.0);
+    vR = vUv + vec2(texelSize.x, 0.0);
+    vT = vUv + vec2(0.0, texelSize.y);
+    vB = vUv - vec2(0.0, texelSize.y);
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+  }
+`;
+
+const displayShaderSource = `
+  precision highp float;
+  precision highp sampler2D;
+  varying vec2 vUv;
+  uniform sampler2D uTexture;
+  
+  void main () {
+    vec3 C = texture2D(uTexture, vUv).rgb;
+    float a = max(C.r, max(C.g, C.b));
+    gl_FragColor = vec4(C, a);
+  }
+`;
+
+const splatShaderSource = `
+  precision highp float;
+  precision highp sampler2D;
+  varying vec2 vUv;
+  uniform sampler2D uTarget;
+  uniform float aspectRatio;
+  uniform vec3 color;
+  uniform vec2 point;
+  uniform float radius;
+  
+  void main () {
+    vec2 p = vUv - point.xy;
+    p.x *= aspectRatio;
+    vec3 splat = exp(-dot(p, p) / radius) * color;
+    vec3 base = texture2D(uTarget, vUv).xyz;
+    gl_FragColor = vec4(base + splat, 1.0);
+  }
+`;
+
+const advectionShader = `
+  precision highp float;
+  precision highp sampler2D;
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform sampler2D uSource;
+  uniform vec2 texelSize;
+  uniform float dt;
+  uniform float dissipation;
+  
+  void main () {
+    vec2 coord = vUv - dt * texture2D(uVelocity, vUv).xy * texelSize;
+    gl_FragColor = dissipation * texture2D(uSource, coord);
+  }
+`;
+
+const pressureShader = `
+  precision highp float;
+  precision highp sampler2D;
+  varying vec2 vUv;
+  varying vec2 vL;
+  varying vec2 vR;
+  varying vec2 vT;
+  varying vec2 vB;
+  uniform sampler2D uPressure;
+  uniform sampler2D uDivergence;
+  
+  void main () {
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    float C = texture2D(uPressure, vUv).x;
+    float divergence = texture2D(uDivergence, vUv).x;
+    float pressure = (L + R + T + B - divergence) * 0.25;
+    gl_FragColor = vec4(pressure, 0.0, 0.0, 1.0);
+  }
+`;
+
+const gradientSubtractShader = `
+  precision highp float;
+  precision highp sampler2D;
+  varying vec2 vUv;
+  varying vec2 vL;
+  varying vec2 vR;
+  varying vec2 vT;
+  varying vec2 vB;
+  uniform sampler2D uPressure;
+  uniform sampler2D uVelocity;
+  
+  void main () {
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    vec2 velocity = texture2D(uVelocity, vUv).xy;
+    velocity.xy -= vec2(R - L, T - B);
+    gl_FragColor = vec4(velocity, 0.0, 1.0);
+  }
+`;
+
+export function createFluidSimulation(canvas: HTMLCanvasElement, _config?: Partial<Config>) {
+  // WebGL context setup with better error handling
+  const gl = canvas.getContext('webgl', { 
+    antialias: false, 
+    preserveDrawingBuffer: true 
+  });
+  
+  if (!gl) {
+    throw new Error('WebGL not supported in this browser');
+  }
+
+  // TypeScript assertion that gl is non-null from this point forward
+  const webgl = gl as WebGLRenderingContext;
+
+  // Check for required extensions
+  const ext = webgl.getExtension('OES_texture_float');
+  if (!ext) {
+    console.warn('OES_texture_float not supported, falling back to UNSIGNED_BYTE textures');
+  }
+
+  // Configuration
+  const config: Config = {
+    SIM_RESOLUTION: _config?.SIM_RESOLUTION ?? 64, // Reduced for compatibility
+    DYE_RESOLUTION: _config?.DYE_RESOLUTION ?? 256, // Reduced for compatibility
+    COLORS: _config?.COLORS ?? [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]],
+    SPLAT_RADIUS: _config?.SPLAT_RADIUS ?? 0.005,
+    FORCE_MULT: _config?.FORCE_MULT ?? 6000,
+    TRANSPARENT: _config?.TRANSPARENT ?? true,
+    BACK_COLOR: _config?.BACK_COLOR ?? [0, 0, 0, 0]
+  };
+
+  // Improved shader compilation with detailed error reporting
+  function compileShader(type: number, source: string): WebGLShader {
+    const shader = webgl.createShader(type);
+    if (!shader) {
+      throw new Error('Failed to create shader object');
+    }
+    
+    webgl.shaderSource(shader, source);
+    webgl.compileShader(shader);
+    
+    if (!webgl.getShaderParameter(shader, webgl.COMPILE_STATUS)) {
+      const error = webgl.getShaderInfoLog(shader);
+      webgl.deleteShader(shader);
+      throw new Error(`Shader compilation failed: ${error}\nSource:\n${source}`);
+    }
+    
+    return shader;
+  }
+
+  // Improved program creation with detailed error reporting
+  function createProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): WebGLProgram {
+    const program = webgl.createProgram();
+    if (!program) {
+      throw new Error('Failed to create program object');
+    }
+    
+    webgl.attachShader(program, vertexShader);
+    webgl.attachShader(program, fragmentShader);
+    webgl.linkProgram(program);
+    
+    if (!webgl.getProgramParameter(program, webgl.LINK_STATUS)) {
+      const error = webgl.getProgramInfoLog(program);
+      webgl.deleteProgram(program);
+      throw new Error(`Program linking failed: ${error}`);
+    }
+    
+    return program;
+  }
+
+  // Compile shaders with try-catch for better error handling
+  try {
+    var vertexShader = compileShader(gl.VERTEX_SHADER, baseVertexShader);
+    var displayFragmentShader = compileShader(gl.FRAGMENT_SHADER, displayShaderSource);
+    var splatFragmentShader = compileShader(gl.FRAGMENT_SHADER, splatShaderSource);
+    var advectionFragmentShader = compileShader(gl.FRAGMENT_SHADER, advectionShader);
+    var pressureFragmentShader = compileShader(gl.FRAGMENT_SHADER, pressureShader);
+    var gradientFragmentShader = compileShader(gl.FRAGMENT_SHADER, gradientSubtractShader);
+  } catch (error) {
+    console.error('Shader compilation failed:', error);
+    throw error;
+  }
+
+  // Create programs
+  const displayProgram = createProgram(vertexShader, displayFragmentShader);
+  const splatProgram = createProgram(vertexShader, splatFragmentShader);
+  const advectionProgram = createProgram(vertexShader, advectionFragmentShader);
+  const pressureProgram = createProgram(vertexShader, pressureFragmentShader);
+  const gradientProgram = createProgram(vertexShader, gradientFragmentShader);
+
+  // Set up vertex attributes properly
+  const positionAttributeLocation = gl.getAttribLocation(displayProgram, 'aPosition');
+  
+  // Create and bind vertex buffer
+  const vertexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]),
+    gl.STATIC_DRAW
+  );
+
+  // Enable vertex attribute
+  gl.enableVertexAttribArray(positionAttributeLocation);
+  gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+
+  // Simplified texture creation for compatibility
+  function createTexture(w: number, h: number): WebGLTexture {
+    const texture = gl.createTexture();
+    if (!texture) throw new Error('Failed to create texture');
+    
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    
+    // Use UNSIGNED_BYTE for better compatibility
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    
+    return texture;
+  }
+
+  // Simple FBO creation
+  function createFBO(w: number, h: number): { framebuffer: WebGLFramebuffer, texture: WebGLTexture } {
+    const framebuffer = gl.createFramebuffer();
+    if (!framebuffer) throw new Error('Failed to create framebuffer');
+    
+    const texture = createTexture(w, h);
+    
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error(`Framebuffer incomplete: ${status}`);
+    }
+    
+    return { framebuffer, texture };
+  }
+
+  // Create render targets
+  const dyeWidth = config.DYE_RESOLUTION;
+  const dyeHeight = config.DYE_RESOLUTION;
+  
+  const dyeFBO = createFBO(dyeWidth, dyeHeight);
+
+  // Simplified render function
+  function render() {
+    // Set canvas size
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // Clear background
+    if (config.TRANSPARENT) {
+      gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    } else {
+      gl.clearColor(
+        config.BACK_COLOR[0],
+        config.BACK_COLOR[1],
+        config.BACK_COLOR[2],
+        config.BACK_COLOR[3]
+      );
+    }
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Simple display render
+    gl.useProgram(displayProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    
+    // Bind texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, dyeFBO.texture);
+    gl.uniform1i(gl.getUniformLocation(displayProgram, 'uTexture'), 0);
+    
+    // Draw
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+  }
+
+  // Simple splat function for testing
+  function addSplat(x: number, y: number, color: number[]) {
+    gl.viewport(0, 0, dyeWidth, dyeHeight);
+    gl.useProgram(splatProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dyeFBO.framebuffer);
+    
+    // Set uniforms
+    gl.uniform1f(gl.getUniformLocation(splatProgram, 'aspectRatio'), canvas.width / canvas.height);
+    gl.uniform2f(gl.getUniformLocation(splatProgram, 'point'), x, y);
+    gl.uniform3f(gl.getUniformLocation(splatProgram, 'color'), color[0], color[1], color[2]);
+    gl.uniform1f(gl.getUniformLocation(splatProgram, 'radius'), config.SPLAT_RADIUS);
+    
+    // Bind current texture as input
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, dyeFBO.texture);
+    gl.uniform1i(gl.getUniformLocation(splatProgram, 'uTarget'), 0);
+    
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+  }
+
+  // State
+  let pointerX = 0;
+  let pointerY = 0;
+  let isPointerDown = false;
+  let requestID: number;
+
+  // Event handlers
+  function updatePointerPosition(e: MouseEvent | TouchEvent) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ('touches' in e ? e.touches[0].clientX : e.clientX) - rect.left;
+    const y = ('touches' in e ? e.touches[0].clientY : e.clientY) - rect.top;
+    pointerX = x / rect.width;
+    pointerY = 1.0 - y / rect.height;
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    updatePointerPosition(e);
+    if (isPointerDown) {
+      const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+      addSplat(pointerX, pointerY, color);
+    }
+  });
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    updatePointerPosition(e);
+    if (isPointerDown) {
+      const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+      addSplat(pointerX, pointerY, color);
+    }
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    isPointerDown = true;
+    updatePointerPosition(e);
+    const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+    addSplat(pointerX, pointerY, color);
+  });
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    isPointerDown = true;
+    updatePointerPosition(e);
+    const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+    addSplat(pointerX, pointerY, color);
+  });
+
+  window.addEventListener('mouseup', () => {
+    isPointerDown = false;
+  });
+
+  window.addEventListener('touchend', () => {
+    isPointerDown = false;
+  });
+
+  // Animation loop
+  function animate() {
+    render();
+    requestID = requestAnimationFrame(animate);
+  }
+
+  // Start animation
+  animate();
+
+  // Cleanup function
+  return () => {
+    cancelAnimationFrame(requestID);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+  };
+} 

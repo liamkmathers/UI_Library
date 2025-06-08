@@ -1,0 +1,198 @@
+export interface Config {
+  SIM_RESOLUTION: number;
+  DYE_RESOLUTION: number;
+  COLORS: [number, number, number, number][];
+  SPLAT_RADIUS: number;
+  FORCE_MULT: number;
+  TRANSPARENT: boolean;
+  BACK_COLOR: [number, number, number, number];
+}
+
+export function createFluidSimulation(canvas: HTMLCanvasElement, _config?: Partial<Config>) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Canvas 2D context not supported');
+  }
+
+  // TypeScript assertion - ctx is guaranteed to be non-null from this point
+  const context = ctx as CanvasRenderingContext2D;
+
+  // Configuration
+  const config: Config = {
+    SIM_RESOLUTION: _config?.SIM_RESOLUTION ?? 64,
+    DYE_RESOLUTION: _config?.DYE_RESOLUTION ?? 256,
+    COLORS: _config?.COLORS ?? [
+      [0.11, 0.88, 0.76, 1],  // teal
+      [0.39, 0.33, 1, 1],     // indigo
+      [1, 0.6, 0.2, 1],       // orange
+    ],
+    SPLAT_RADIUS: _config?.SPLAT_RADIUS ?? 25,
+    FORCE_MULT: _config?.FORCE_MULT ?? 6000,
+    TRANSPARENT: _config?.TRANSPARENT ?? true,
+    BACK_COLOR: _config?.BACK_COLOR ?? [0, 0, 0, 0]
+  };
+
+  // State
+  let animationId: number;
+  const particles: Array<{
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    color: string;
+    life: number;
+    size: number;
+  }> = [];
+
+  // Resize canvas
+  function resizeCanvas() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+  }
+
+  // Add splat at position
+  function addSplat(x: number, y: number) {
+    const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+    const colorStr = `rgba(${Math.floor(color[0] * 255)}, ${Math.floor(color[1] * 255)}, ${Math.floor(color[2] * 255)}, ${color[3]})`;
+    
+    // Create multiple particles for richer effect
+    for (let i = 0; i < 8; i++) {
+      particles.push({
+        x: x * canvas.width,
+        y: y * canvas.height,
+        vx: (Math.random() - 0.5) * 6,
+        vy: (Math.random() - 0.5) * 6,
+        color: colorStr,
+        life: 1,
+        size: config.SPLAT_RADIUS + Math.random() * 20
+      });
+    }
+  }
+
+  // Render function
+  function render() {
+    resizeCanvas();
+
+    // Clear background
+    if (config.TRANSPARENT) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    } else {
+      ctx.fillStyle = `rgba(${Math.floor(config.BACK_COLOR[0] * 255)}, ${Math.floor(config.BACK_COLOR[1] * 255)}, ${Math.floor(config.BACK_COLOR[2] * 255)}, ${config.BACK_COLOR[3]})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Update and draw particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      
+      // Update physics
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.995; // Slight friction
+      p.vy *= 0.995;
+      p.life -= 0.015; // Fade out
+      p.size *= 0.99; // Shrink slightly
+
+      // Remove dead particles
+      if (p.life <= 0 || p.size < 1) {
+        particles.splice(i, 1);
+        continue;
+      }
+
+      // Draw particle with trailing effect
+      ctx.globalAlpha = p.life * 0.8;
+      ctx.fillStyle = p.color;
+      
+      // Create gradient for smooth appearance
+      const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+      gradient.addColorStop(0, p.color);
+      gradient.addColorStop(1, 'transparent');
+      ctx.fillStyle = gradient;
+      
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    animationId = requestAnimationFrame(render);
+  }
+
+  // Event handlers
+  function getPointerPosition(e: MouseEvent | TouchEvent): { x: number, y: number } {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height
+    };
+  }
+
+  let isPointerDown = false;
+  let lastPos = { x: 0, y: 0 };
+
+  function onPointerMove(e: MouseEvent | TouchEvent) {
+    const pos = getPointerPosition(e);
+    
+    if (isPointerDown) {
+      // Create trail effect by adding multiple splats between last and current position
+      const dx = pos.x - lastPos.x;
+      const dy = pos.y - lastPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const steps = Math.max(1, Math.floor(distance * 100)); // More splats for faster movement
+      
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const interpX = lastPos.x + dx * t;
+        const interpY = lastPos.y + dy * t;
+        addSplat(interpX, interpY);
+      }
+    }
+    
+    lastPos = pos;
+  }
+
+  function onPointerDown(e: MouseEvent | TouchEvent) {
+    isPointerDown = true;
+    const pos = getPointerPosition(e);
+    lastPos = pos;
+    addSplat(pos.x, pos.y);
+  }
+
+  function onPointerUp() {
+    isPointerDown = false;
+  }
+
+  // Add event listeners
+  canvas.addEventListener('mousemove', onPointerMove);
+  canvas.addEventListener('mousedown', onPointerDown);
+  canvas.addEventListener('mouseup', onPointerUp);
+  
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    onPointerMove(e);
+  });
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    onPointerDown(e);
+  });
+  canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    onPointerUp();
+  });
+
+  // Start rendering
+  render();
+
+  // Return cleanup function
+  return () => {
+    cancelAnimationFrame(animationId);
+    canvas.removeEventListener('mousemove', onPointerMove);
+    canvas.removeEventListener('mousedown', onPointerDown);
+    canvas.removeEventListener('mouseup', onPointerUp);
+    canvas.removeEventListener('touchmove', onPointerMove);
+    canvas.removeEventListener('touchstart', onPointerDown);
+    canvas.removeEventListener('touchend', onPointerUp);
+  };
+} 

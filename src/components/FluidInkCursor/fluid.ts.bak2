@@ -1,0 +1,353 @@
+export interface Config {
+  SIM_RESOLUTION: number;
+  DYE_RESOLUTION: number;
+  COLORS: [number, number, number, number][];
+  SPLAT_RADIUS: number;
+  FORCE_MULT: number;
+  TRANSPARENT: boolean;
+  BACK_COLOR: [number, number, number, number];
+}
+
+export function createFluidSimulation(canvas: HTMLCanvasElement, _config?: Partial<Config>) {
+  // WebGL context setup
+  const gl = canvas.getContext('webgl', { 
+    antialias: false, 
+    preserveDrawingBuffer: true 
+  });
+  
+  if (!gl) {
+    console.warn('WebGL not supported, using 2D canvas fallback');
+    return createCanvas2DFallback(canvas, _config);
+  }
+
+  // TypeScript assertion - gl is guaranteed to be non-null from this point
+  const webgl = gl as WebGLRenderingContext;
+
+  // Configuration
+  const config: Config = {
+    SIM_RESOLUTION: _config?.SIM_RESOLUTION ?? 64,
+    DYE_RESOLUTION: _config?.DYE_RESOLUTION ?? 256,
+    COLORS: _config?.COLORS ?? [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]],
+    SPLAT_RADIUS: _config?.SPLAT_RADIUS ?? 0.025,
+    FORCE_MULT: _config?.FORCE_MULT ?? 6000,
+    TRANSPARENT: _config?.TRANSPARENT ?? true,
+    BACK_COLOR: _config?.BACK_COLOR ?? [0, 0, 0, 0]
+  };
+
+  // Simple vertex shader
+  const vertexShaderSource = `
+    attribute vec2 a_position;
+    varying vec2 v_uv;
+    void main() {
+      v_uv = a_position * 0.5 + 0.5;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }
+  `;
+
+  // Simple fragment shader for display
+  const fragmentShaderSource = `
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_texture;
+    void main() {
+      vec4 color = texture2D(u_texture, v_uv);
+      gl_FragColor = vec4(color.rgb, color.a);
+    }
+  `;
+
+  // Simple splat shader
+  const splatShaderSource = `
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform vec2 u_point;
+    uniform vec3 u_color;
+    uniform float u_radius;
+    uniform float u_aspect_ratio;
+    void main() {
+      vec2 p = v_uv - u_point;
+      p.x *= u_aspect_ratio;
+      float dist = length(p);
+      float intensity = exp(-dist * dist / u_radius);
+      gl_FragColor = vec4(u_color * intensity, intensity);
+    }
+  `;
+
+  function createShader(type: number, source: string): WebGLShader | null {
+    const shader = gl.createShader(type);
+    if (!shader) return null;
+    
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    
+    return shader;
+  }
+
+  function createProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): WebGLProgram | null {
+    const program = gl.createProgram();
+    if (!program) return null;
+    
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error('Program link error:', gl.getProgramInfoLog(program));
+      gl.deleteProgram(program);
+      return null;
+    }
+    
+    return program;
+  }
+
+  // Create shaders
+  const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
+  const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
+  const splatFragmentShader = createShader(gl.FRAGMENT_SHADER, splatShaderSource);
+
+  if (!vertexShader || !fragmentShader || !splatFragmentShader) {
+    console.warn('Failed to create shaders, using 2D canvas fallback');
+    return createCanvas2DFallback(canvas, _config);
+  }
+
+  // Create programs
+  const displayProgram = createProgram(vertexShader, fragmentShader);
+  const splatProgram = createProgram(vertexShader, splatFragmentShader);
+
+  if (!displayProgram || !splatProgram) {
+    console.warn('Failed to create programs, using 2D canvas fallback');
+    return createCanvas2DFallback(canvas, _config);
+  }
+
+  // Create vertex buffer
+  const vertices = new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]);
+  const vertexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+  // Create texture
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, config.DYE_RESOLUTION, config.DYE_RESOLUTION, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // Create framebuffer
+  const framebuffer = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+
+  // State
+  let animationId: number;
+
+  function render() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // Clear
+    if (config.TRANSPARENT) {
+      gl.clearColor(0, 0, 0, 0);
+    } else {
+      gl.clearColor(config.BACK_COLOR[0], config.BACK_COLOR[1], config.BACK_COLOR[2], config.BACK_COLOR[3]);
+    }
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Render texture to screen
+    gl.useProgram(displayProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    
+    const positionLocation = gl.getAttribLocation(displayProgram, 'a_position');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(gl.getUniformLocation(displayProgram, 'u_texture'), 0);
+    
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+    animationId = requestAnimationFrame(render);
+  }
+
+  function addSplat(x: number, y: number, color: [number, number, number, number]) {
+    gl.viewport(0, 0, config.DYE_RESOLUTION, config.DYE_RESOLUTION);
+    gl.useProgram(splatProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    
+    // Enable blending
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    
+    const positionLocation = gl.getAttribLocation(splatProgram, 'a_position');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    
+    gl.uniform2f(gl.getUniformLocation(splatProgram, 'u_point'), x, 1.0 - y);
+    gl.uniform3f(gl.getUniformLocation(splatProgram, 'u_color'), color[0], color[1], color[2]);
+    gl.uniform1f(gl.getUniformLocation(splatProgram, 'u_radius'), config.SPLAT_RADIUS);
+    gl.uniform1f(gl.getUniformLocation(splatProgram, 'u_aspect_ratio'), canvas.width / canvas.height);
+    
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    gl.disable(gl.BLEND);
+  }
+
+  // Mouse/touch events
+  function getPointerPosition(e: MouseEvent | TouchEvent): { x: number, y: number } {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height
+    };
+  }
+
+  function onPointerMove(e: MouseEvent | TouchEvent) {
+    const pos = getPointerPosition(e);
+    const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+    addSplat(pos.x, pos.y, color);
+  }
+
+  canvas.addEventListener('mousemove', onPointerMove);
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    onPointerMove(e);
+  });
+
+  canvas.addEventListener('mousedown', onPointerMove);
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    onPointerMove(e);
+  });
+
+  // Start rendering
+  render();
+
+  // Cleanup
+  return () => {
+    cancelAnimationFrame(animationId);
+    canvas.removeEventListener('mousemove', onPointerMove);
+    canvas.removeEventListener('touchmove', onPointerMove);
+    canvas.removeEventListener('mousedown', onPointerMove);
+    canvas.removeEventListener('touchstart', onPointerMove);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+  };
+}
+
+// 2D Canvas fallback
+function createCanvas2DFallback(canvas: HTMLCanvasElement, _config?: Partial<Config>) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Neither WebGL nor 2D canvas is supported');
+  }
+
+  const config: Config = {
+    SIM_RESOLUTION: _config?.SIM_RESOLUTION ?? 64,
+    DYE_RESOLUTION: _config?.DYE_RESOLUTION ?? 256,
+    COLORS: _config?.COLORS ?? [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]],
+    SPLAT_RADIUS: _config?.SPLAT_RADIUS ?? 25,
+    FORCE_MULT: _config?.FORCE_MULT ?? 6000,
+    TRANSPARENT: _config?.TRANSPARENT ?? true,
+    BACK_COLOR: _config?.BACK_COLOR ?? [0, 0, 0, 0]
+  };
+
+  let animationId: number;
+  const particles: Array<{x: number, y: number, vx: number, vy: number, color: string, life: number}> = [];
+
+  function render() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+
+    if (config.TRANSPARENT) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    } else {
+      ctx.fillStyle = `rgba(${config.BACK_COLOR[0] * 255}, ${config.BACK_COLOR[1] * 255}, ${config.BACK_COLOR[2] * 255}, ${config.BACK_COLOR[3]})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Update and draw particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.99;
+      p.vy *= 0.99;
+      p.life -= 0.02;
+
+      if (p.life <= 0) {
+        particles.splice(i, 1);
+        continue;
+      }
+
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, config.SPLAT_RADIUS * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    animationId = requestAnimationFrame(render);
+  }
+
+  function addSplat(x: number, y: number) {
+    const color = config.COLORS[Math.floor(Math.random() * config.COLORS.length)];
+    const colorStr = `rgb(${color[0] * 255}, ${color[1] * 255}, ${color[2] * 255})`;
+    
+    for (let i = 0; i < 5; i++) {
+      particles.push({
+        x: x * canvas.width,
+        y: y * canvas.height,
+        vx: (Math.random() - 0.5) * 4,
+        vy: (Math.random() - 0.5) * 4,
+        color: colorStr,
+        life: 1
+      });
+    }
+  }
+
+  function getPointerPosition(e: MouseEvent | TouchEvent): { x: number, y: number } {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height
+    };
+  }
+
+  function onPointerMove(e: MouseEvent | TouchEvent) {
+    const pos = getPointerPosition(e);
+    addSplat(pos.x, pos.y);
+  }
+
+  canvas.addEventListener('mousemove', onPointerMove);
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    onPointerMove(e);
+  });
+
+  canvas.addEventListener('mousedown', onPointerMove);
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    onPointerMove(e);
+  });
+
+  render();
+
+  return () => {
+    cancelAnimationFrame(animationId);
+    canvas.removeEventListener('mousemove', onPointerMove);
+    canvas.removeEventListener('touchmove', onPointerMove);
+    canvas.removeEventListener('mousedown', onPointerMove);
+    canvas.removeEventListener('touchstart', onPointerMove);
+  };
+} 

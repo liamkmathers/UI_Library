@@ -2,7 +2,6 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Environment } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody, CuboidCollider } from '@react-three/rapier';
 import { Suspense, useRef } from 'react';
-import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { MeshStandardMaterial } from 'three';
 import useParts from './useParts';
