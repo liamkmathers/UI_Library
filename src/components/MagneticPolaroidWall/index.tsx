@@ -43,8 +43,8 @@ function Scene() {
 
   const positions = useMemo(() =>
     PHOTOS.map((_, i) => [
-      (i % 4) * 2.5 - 3.75,   // x grid
-      Math.floor(i / 4) * -2.8 + 2.8, // y grid
+      (i % 10) * 2.5 - 11.25,   // x grid: 10 columns
+      Math.floor(i / 10) * -2.8 + 4.2, // y grid: 4 rows
       0,
     ] as [number, number, number]),
   []);
@@ -79,8 +79,8 @@ function Scene() {
       <OrbitControls 
         enableZoom={true}
         enablePan={false}
-        minDistance={3}
-        maxDistance={12}
+        minDistance={8}
+        maxDistance={25}
         maxPolarAngle={Math.PI / 2}
       />
 
@@ -103,7 +103,7 @@ export default function MagneticPolaroidWall() {
     <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
       <Canvas
         shadows
-        camera={{ position: [0, 0, 8], fov: 45 }}
+        camera={{ position: [0, 0, 20], fov: 45 }}
         className="w-full h-full"
       >
         <Suspense fallback={null}>
