@@ -1,0 +1,7 @@
+{
+  "name": "Wave Function Background",
+  "description": "Mathematical wave visualization with Gaussian envelope and gradient shading, featuring 4 distinct color themes",
+  "tags": ["svg", "animation", "waves", "gradient", "mathematical", "background"],
+  "complexity": "intermediate",
+  "inspiration": "WebGL gradient techniques adapted to SVG"
+} 
