@@ -1,33 +1,35 @@
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Html, Environment } from '@react-three/drei';
-import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
-import { Suspense, useState, useRef } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { OrbitControls, Environment } from '@react-three/drei';
+import { Physics, RigidBody, RapierRigidBody, CuboidCollider } from '@react-three/rapier';
+import { Suspense, useRef } from 'react';
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { MeshStandardMaterial } from 'three';
 import useParts from './useParts';
-import InfoCard from './InfoCard';
 
 function Scene() {
   const parts = useParts('/models/GearboxAssy.glb');
-  const [active, setActive] = useState<string | null>(null);
-  const [hoveredPart, setHoveredPart] = useState<string | null>(null);
   const bodyRefs = useRef<Map<string, RapierRigidBody>>(new Map());
-  const { camera } = useThree();
   const worldPaused = useRef(false);
 
-  // Camera animation
-  useFrame(() => {
-    if (active && bodyRefs.current.has(active)) {
-      const body = bodyRefs.current.get(active)!;
-      const position = body.translation();
+  const launchAllParts = () => {
+    bodyRefs.current.forEach((body) => {
+      // Reset any existing motion
+      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
       
-      // Very subtle zoom - just slightly closer than the main camera
-      const target = new THREE.Vector3(position.x, position.y + 11, position.z + 11);
-      camera.position.lerp(target, 0.05);
-      camera.lookAt(position.x, position.y, position.z);
-    }
-  });
+      // Create random impulses for each part
+      const randomX = (Math.random() - 0.5) * 3;
+      const randomY = 8 + Math.random() * 4; // Random upward force between 8-12
+      const randomZ = (Math.random() - 0.5) * 3;
+      
+      body.applyImpulse({ x: randomX, y: randomY, z: randomZ }, true);
+      body.applyTorqueImpulse(
+        { x: randomX * 0.5, y: Math.random() * 2, z: randomZ * 0.5 },
+        true
+      );
+    });
+  };
 
   return (
     <>
@@ -40,16 +42,29 @@ function Scene() {
         intensity={1.5}
       />
 
+      {/* Click detector plane */}
+      <mesh
+        position={[0, 0, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        onClick={launchAllParts}
+        onPointerOver={() => { document.body.style.cursor = 'pointer'; }}
+        onPointerOut={() => { document.body.style.cursor = 'auto'; }}
+      >
+        <planeGeometry args={[100, 100]} />
+        <meshBasicMaterial transparent opacity={0} />
+      </mesh>
+
       <Physics 
         gravity={[0, -9.81, 0]}
-        timeStep={1/120} // Slow-mo initially
+        timeStep={1/120}
       >
         {/* Ground */}
-        <RigidBody type="fixed" friction={0.7}>
+        <RigidBody type="fixed" friction={0.7} restitution={0}>
           <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -2, 0]}>
             <planeGeometry args={[50, 50]} />
             <meshStandardMaterial color="#303030" />
           </mesh>
+          <CuboidCollider args={[25, 0.1, 25]} position={[0, 0, 0]} />
         </RigidBody>
 
         {/* Parts */}
@@ -63,24 +78,22 @@ function Scene() {
                 if (body) bodyRefs.current.set(name, body);
               }}
               colliders="hull"
-              friction={1.8}
+              friction={1}
               restitution={0.2}
-              angularDamping={1}
-              linearDamping={0.8}
-              position={[0, 10 + i * 0.5, 0]} // Higher starting position
+              angularDamping={0.8}
+              linearDamping={0.5}
+              position={[0, 10 + i * 0.5, 0]}
               rotation={[
                 Math.random() * 0.2, 
                 Math.random() * Math.PI * 2, 
                 Math.random() * 0.2
               ]}
-              scale={0.4} // Scale down the parts
+              scale={0.4}
               onCollisionEnter={() => {
-                // After first impact, freeze this body for perf
                 if (!worldPaused.current) {
                   setTimeout(() => {
                     const body = bodyRefs.current.get(name);
                     if (body?.isSleeping()) {
-                      // Freeze the body by setting zero velocities
                       body.setLinvel({ x: 0, y: 0, z: 0 }, true);
                       body.setAngvel({ x: 0, y: 0, z: 0 }, true);
                     }
@@ -94,7 +107,7 @@ function Scene() {
                 receiveShadow
                 onClick={(e: ThreeEvent<MouseEvent>) => {
                   e.stopPropagation();
-                  setActive(name);
+                  launchAllParts();
                 }}
                 onPointerOver={(e: ThreeEvent<PointerEvent>) => {
                   e.stopPropagation();
@@ -115,34 +128,9 @@ function Scene() {
         })}
       </Physics>
 
-      {/* Info overlay */}
-      {active && bodyRefs.current.has(active) && (
-        <Html
-          position={bodyRefs.current.get(active)!.translation() as unknown as [number, number, number]}
-          wrapperClass="pointer-events-auto"
-          distanceFactor={15}
-          center
-          style={{
-            transform: 'translateX(100px)' // Offset to the right of the part
-          }}
-        >
-          <InfoCard 
-            partName={active} 
-            onClose={() => {
-              setActive(null);
-              // Reset camera to a better default view
-              camera.position.set(0, 15, 25);
-              camera.lookAt(0, 0, 0);
-            }} 
-          />
-        </Html>
-      )}
-
-      {/* Controls */}
       <OrbitControls 
         enableDamping 
         dampingFactor={0.05} 
-        enabled={!active}
         minDistance={10}
         maxDistance={50}
       />
