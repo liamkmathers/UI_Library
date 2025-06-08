@@ -1,10 +1,9 @@
 import React, { Suspense, useState, useRef, useCallback, useMemo } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Box, Sphere, Text } from '@react-three/drei';
-import * as THREE from 'three';
 
 // Physics imports - now active with @react-three/rapier v1.5.0
-import { Physics, RigidBody, CuboidCollider, RapierRigidBody } from '@react-three/rapier';
+import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
 
 interface PhysicsCardProps {
   position: [number, number, number];
@@ -279,7 +278,6 @@ export default function RapierPhysicsPlayground() {
   const [gravity, setGravity] = useState(-9.81);
   const [paused, setPaused] = useState(false);
   const [key, setKey] = useState(0); // For resetting scene
-  const [error, setError] = useState<string | null>(null);
 
   const canvasStyle = useMemo(() => ({
     background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
@@ -288,29 +286,6 @@ export default function RapierPhysicsPlayground() {
   const handleResetScene = useCallback(() => {
     setKey(prev => prev + 1); // Force re-render to reset physics
   }, []);
-
-  // Error boundary-like error handling
-  const handleError = useCallback((error: Error) => {
-    console.error('Physics playground error:', error);
-    setError(error.message);
-  }, []);
-
-  if (error) {
-    return (
-      <div className="relative w-full h-screen flex items-center justify-center bg-red-100">
-        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
-          <h2 className="text-xl font-bold text-red-600 mb-4">Physics Engine Error</h2>
-          <p className="text-gray-700 mb-4">{error}</p>
-          <button 
-            onClick={() => setError(null)}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Try Again
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="relative w-full h-screen">

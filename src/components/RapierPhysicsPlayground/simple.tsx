@@ -1,7 +1,7 @@
-import React, { Suspense } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Box } from '@react-three/drei';
 import { Physics, RigidBody } from '@react-three/rapier';
+import { Suspense } from 'react';
 
 // Simple physics test
 function SimplePhysicsTest() {
